@@ -52,6 +52,16 @@ bool BeautyFaceFilter::Init() {
   RegisterProperty("skin_smoothing", 0,
                    "The smoothing of filter with range between -1 and 1.",
                    [this](float& val) { SetBlurAlpha(val); });
+
+  // ===== 本地扩展（fork）：注册 sharpen 属性 =====
+  // 上游只在 Init() 里注册了 whiteness / skin_smoothing，而 BeautyFaceFilter::SetSharpen
+  // 早已存在（转发给 BeautyFaceUnitFilter，shader 里有 `uniform highp float sharpen`）——
+  // 但由于**未注册成 property**，Java 侧 `SetProperty("sharpen", ...)` 会被静默忽略
+  // （Filter::SetProperty 找不到 key 时只打 LOG_WARN），导致应用侧的「GPUPixel 锐化」
+  // 滑块完全无效。这里补上注册即可让该滑块真正生效。
+  RegisterProperty("sharpen", 0,
+                   "The sharpen of filter with range between -1 and 1.",
+                   [this](float& val) { SetSharpen(val); });
   return true;
 }
 
