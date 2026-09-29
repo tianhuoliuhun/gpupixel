@@ -48,9 +48,35 @@ GPUPixelFramebuffer::GPUPixelFramebuffer(
   }
 }
 
+// 本地扩展（fork）：包装外部纹理 —— 不创建纹理/FBO，只持有 id 与尺寸。
+// 成员初始化顺序必须与头文件中的声明顺序一致。
+GPUPixelFramebuffer::GPUPixelFramebuffer(uint32_t existing_texture,
+                                         int width,
+                                         int height)
+    : width_(width),
+      height_(height),
+      has_framebuffer_(false),
+      texture_(existing_texture),
+      framebuffer_(-1),
+      is_wrapped_texture_(true) {
+  texture_attributes_ = default_texture_attributes;
+}
+
+std::shared_ptr<GPUPixelFramebuffer>
+GPUPixelFramebuffer::CreateFromExistingTexture(uint32_t texture,
+                                               int width,
+                                               int height) {
+  if (texture == 0 || width <= 0 || height <= 0) {
+    return nullptr;
+  }
+  return std::shared_ptr<GPUPixelFramebuffer>(
+      new GPUPixelFramebuffer(texture, width, height));
+}
+
 GPUPixelFramebuffer::~GPUPixelFramebuffer() {
   gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
-    bool should_delete_texture = (texture_ != -1);
+    // ⚠️ 包装模式下纹理归**外部**所有，绝不能删 —— 否则会连带毁掉外部渲染器的画面
+    bool should_delete_texture = (!is_wrapped_texture_ && texture_ != -1);
     bool should_delete_framebuffer = (framebuffer_ != -1);
 
     if (should_delete_texture) {
