@@ -25,6 +25,8 @@ set(common_source_files
     ${CMAKE_CURRENT_SOURCE_DIR}/sink/sink_raw_data.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/sink/sink_raw_data_yuv.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/sink/sink_render.cc
+    # 本地扩展（fork）：输出侧 texture 通道 —— 结果留在 GPU 上，供共享 context 采样
+    ${CMAKE_CURRENT_SOURCE_DIR}/sink/sink_texture.cc
 #if defined(GPUPIXEL_ANDROID)
     ${CMAKE_CURRENT_SOURCE_DIR}/sink/sink_surface.cc
 #endif
@@ -101,7 +103,9 @@ set(jni_source_files
     ${CMAKE_CURRENT_SOURCE_DIR}/android/jni/jni_face_detector.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/android/jni/jni_sink_raw_data.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/android/jni/jni_sink_raw_yuv.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/android/jni/jni_sink_surface.cc)
+    ${CMAKE_CURRENT_SOURCE_DIR}/android/jni/jni_sink_surface.cc
+    # 本地扩展（fork）：SinkTexture 的 JNI
+    ${CMAKE_CURRENT_SOURCE_DIR}/android/jni/jni_sink_texture.cc)
 
 set(lib_source_code_files ${common_source_files})
 

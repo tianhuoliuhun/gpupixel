@@ -6,6 +6,7 @@
  */
 
 #include "android/jni/jni_helpers.h"
+#include "core/gpupixel_context.h"
 
 #include <android/log.h>
 #include <asm/unistd.h>
@@ -317,4 +318,31 @@ Java_com_pixpark_gpupixel_GPUPixel_nativeSetResourcePath(JNIEnv* env,
   std::stringstream ss;
   ss << "Set resource path to: " << c_path;
   LOG_INFO("{}", ss.str());
+}
+
+// ===== 本地扩展（fork）：把当前线程的 EGL context 注册为共享源 =====
+
+/**
+ * 捕获**当前线程**的 EGL context 并登记为 GPUPixel 的 share_context。
+ *
+ * 用法（Android）：在 GLSurfaceView 的渲染线程里、且在任何会触发 GPUPixel GPU
+ * 操作的调用**之前**调用（典型位置：Renderer.onSurfaceCreated 开头）。
+ *
+ * 共享后 GPUPixel 与外部渲染器互通 texture / FBO / sync，从而可彻底免去每帧
+ * 「回读成字节 → 再上传」的跨界搬运（1080p 约 5 × 8.29 MB/帧）。
+ *
+ * @return 是否捕获成功（无 current context 时返回 false，GPUPixel 会退回私有 context）
+ */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pixpark_gpupixel_GPUPixel_nativeCaptureSharedEglContext(JNIEnv* env,
+                                                                 jclass clazz) {
+  return gpupixel::GPUPixelContext::CaptureCurrentEglContextAsShare() ? JNI_TRUE
+                                                                     : JNI_FALSE;
+}
+
+/** 是否已登记共享 context（诊断用） */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pixpark_gpupixel_GPUPixel_nativeHasSharedEglContext(JNIEnv* env,
+                                                             jclass clazz) {
+  return gpupixel::GPUPixelContext::HasSharedEglContext() ? JNI_TRUE : JNI_FALSE;
 }

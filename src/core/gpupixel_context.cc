@@ -9,6 +9,7 @@
 #include "utils/dispatch_queue.h"
 #include "utils/logging.h"
 #include "utils/util.h"
+#include <vector>
 #if defined(GPUPIXEL_WASM)
 #include <emscripten.h>
 #include <emscripten/html5.h>
@@ -18,6 +19,71 @@ namespace gpupixel {
 
 GPUPixelContext* GPUPixelContext::instance_ = 0;
 std::mutex GPUPixelContext::mutex_;
+
+// ===== 本地扩展（fork）：共享 EGLContext 的注入槽位 =====
+#if defined(GPUPIXEL_ANDROID)
+EGLDisplay GPUPixelContext::shared_display_ = EGL_NO_DISPLAY;
+EGLConfig GPUPixelContext::shared_config_ = nullptr;
+EGLContext GPUPixelContext::shared_context_ = EGL_NO_CONTEXT;
+
+void GPUPixelContext::SetSharedEglContext(EGLDisplay display,
+                                          EGLConfig config,
+                                          EGLContext share_context) {
+  shared_display_ = display;
+  shared_config_ = config;
+  shared_context_ = share_context;
+  LOG_INFO("GPUPixelContext: external EGL context registered for sharing");
+}
+
+bool GPUPixelContext::CaptureCurrentEglContextAsShare() {
+  EGLDisplay display = eglGetCurrentDisplay();
+  EGLContext context = eglGetCurrentContext();
+  if (display == EGL_NO_DISPLAY || context == EGL_NO_CONTEXT) {
+    LOG_WARN("CaptureCurrentEglContextAsShare: no current EGL context on this thread");
+    return false;
+  }
+
+  // 按 EGL_CONFIG_ID 反查当前 context 对应的 EGLConfig
+  EGLint config_id = 0;
+  if (!eglQueryContext(display, context, EGL_CONFIG_ID, &config_id)) {
+    LOG_WARN("CaptureCurrentEglContextAsShare: eglQueryContext failed");
+    return false;
+  }
+  EGLint num_configs = 0;
+  eglGetConfigs(display, nullptr, 0, &num_configs);
+  if (num_configs <= 0) {
+    LOG_WARN("CaptureCurrentEglContextAsShare: no EGL configs");
+    return false;
+  }
+  std::vector<EGLConfig> configs(static_cast<size_t>(num_configs));
+  EGLint returned = 0;
+  eglGetConfigs(display, configs.data(), num_configs, &returned);
+
+  EGLConfig matched = nullptr;
+  for (EGLint i = 0; i < returned; ++i) {
+    EGLint id = 0;
+    eglGetConfigAttrib(display, configs[i], EGL_CONFIG_ID, &id);
+    if (id == config_id) {
+      matched = configs[i];
+      break;
+    }
+  }
+  if (matched == nullptr) {
+    LOG_WARN("CaptureCurrentEglContextAsShare: config id {} not found", config_id);
+    return false;
+  }
+
+  SetSharedEglContext(display, matched, context);
+  LOG_INFO("GPUPixelContext: captured current context as share source (configId={})",
+           config_id);
+  return true;
+}
+
+bool GPUPixelContext::HasSharedEglContext() {
+  return shared_context_ != EGL_NO_CONTEXT && shared_display_ != EGL_NO_DISPLAY &&
+         shared_config_ != nullptr;
+}
+#endif  // GPUPIXEL_ANDROID
 
 GPUPixelContext::GPUPixelContext() : current_shader_program_(0) {
   LOG_DEBUG("Creating GPUPixelContext");
@@ -122,6 +188,20 @@ void GPUPixelContext::CreateContext() {
   LOG_INFO("macOS OpenGL context created successfully");
 #elif defined(GPUPIXEL_ANDROID)
   LOG_DEBUG("Creating Android EGL context");
+
+  // ===== 本地扩展（fork）：优先尝试与外部分享 context =====
+  // 共享后 texture / FBO / sync 与外部渲染器互通，可彻底免去每帧回读→上传的
+  // 跨界搬运。失败（外部 config 不支持 pbuffer、驱动拒绝共享等）则自动回退，
+  // 保证与上游行为完全一致。
+  if (HasSharedEglContext()) {
+    if (InitContextWith(shared_display_, shared_config_, shared_context_)) {
+      context_is_shared_ = true;
+      LOG_INFO("Android EGL context created WITH SHARING (external context)");
+      return;
+    }
+    LOG_WARN("Shared EGL context init failed -> fallback to private context");
+  }
+
   // Initialize EGL
   egl_display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
   if (egl_display_ == EGL_NO_DISPLAY) {
@@ -265,6 +345,65 @@ void GPUPixelContext::PresentBufferForDisplay() {
 #endif
 }
 
+#if defined(GPUPIXEL_ANDROID)
+bool GPUPixelContext::InitContextWith(EGLDisplay display,
+                                      EGLConfig config,
+                                      EGLContext share_context) {
+  if (display == EGL_NO_DISPLAY || config == nullptr) {
+    return false;
+  }
+
+  EGLint major = 0, minor = 0;
+  if (!eglInitialize(display, &major, &minor)) {
+    LOG_ERROR("InitContextWith: eglInitialize failed");
+    return false;
+  }
+
+  // ⚠️ 共享模式下 priority 用 ES3：实测把 ES2 context 与外部 ES3 context 共享，
+  //    部分驱动会直接拒绝；ES3 向后兼容 ESSL 100，GPUPixel 的 shader 无需改动。
+  EGLContext ctx = EGL_NO_CONTEXT;
+  const EGLint ctx3[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+  ctx = eglCreateContext(display, config, share_context, ctx3);
+  if (ctx == EGL_NO_CONTEXT) {
+    const EGLint ctx2[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+    ctx = eglCreateContext(display, config, share_context, ctx2);
+  }
+  if (ctx == EGL_NO_CONTEXT) {
+    LOG_ERROR("InitContextWith: eglCreateContext(shared) failed, err={}",
+              static_cast<int>(eglGetError()));
+    return false;
+  }
+
+  // GPUPixel 需要一张 1×1 pbuffer 作为 makeCurrent 的 surface（离屏渲染无需 window）
+  const EGLint pbuffer_attribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
+  EGLSurface surface = eglCreatePbufferSurface(display, config, pbuffer_attribs);
+  if (surface == EGL_NO_SURFACE) {
+    LOG_WARN("InitContextWith: pbuffer failed (config lacks EGL_PBUFFER_BIT?), err={}",
+             static_cast<int>(eglGetError()));
+    eglDestroyContext(display, ctx);
+    return false;
+  }
+
+  if (!eglMakeCurrent(display, surface, surface, ctx)) {
+    LOG_ERROR("InitContextWith: eglMakeCurrent failed, err={}",
+              static_cast<int>(eglGetError()));
+    eglDestroySurface(display, surface);
+    eglDestroyContext(display, ctx);
+    return false;
+  }
+
+  egl_display_ = display;
+  egl_config_ = config;
+  egl_surface_ = surface;
+  egl_context_ = ctx;
+  const char* gl_ver =
+      reinterpret_cast<const char*>(glGetString(GL_VERSION));
+  LOG_INFO("InitContextWith: shared context ready (GL_VERSION={})",
+           gl_ver ? gl_ver : "unknown");
+  return true;
+}
+#endif  // GPUPIXEL_ANDROID
+
 void GPUPixelContext::ReleaseContext() {
   LOG_DEBUG("Releasing OpenGL context");
 #if defined(GPUPIXEL_ANDROID)
@@ -284,9 +423,18 @@ void GPUPixelContext::ReleaseContext() {
       egl_context_ = EGL_NO_CONTEXT;
     }
 
-    LOG_TRACE("Terminating EGL display");
-    eglTerminate(egl_display_);
+    // ⚠️ 共享模式下 EGLDisplay 归外部渲染器所有，绝不能 eglTerminate ——
+    //    那会把主渲染的 display 一起销毁。这里只销毁本 context 自己的 surface/context。
+    if (context_is_shared_) {
+      LOG_INFO(
+          "Skip eglTerminate: EGLDisplay is owned by the external renderer "
+          "(shared mode)");
+    } else {
+      LOG_TRACE("Terminating EGL display");
+      eglTerminate(egl_display_);
+    }
     egl_display_ = EGL_NO_DISPLAY;
+    context_is_shared_ = false;
   }
 #elif defined(GPUPIXEL_WIN) || defined(GPUPIXEL_LINUX)
   if (gl_context_) {

@@ -251,6 +251,32 @@ public class GPUPixel {
         return facing == CameraCharacteristics.LENS_FACING_FRONT;
     }
 
+    // ===== 本地扩展（fork）：与外部分享 EGLContext =====
+
+    /**
+     * 捕获**当前线程**的 EGL context，登记为 GPUPixel 自己的 share_context。
+     *
+     * 作用：共享后 GPUPixel 与外部渲染器互通 texture / FBO / sync —— 可直接把处理
+     * 结果留在 GPU 上供外部采样，彻底免去每帧「回读成字节 → 再上传」的跨界搬运
+     * （1080p 下约 5 × 8.29 MB/帧）。
+     *
+     * ⚠️ 必须在**有 current context 的线程**调用（GLSurfaceView 的渲染线程，
+     *    典型位置 Renderer.onSurfaceCreated 开头），且必须在任何会触发 GPUPixel
+     *    GPU 操作的调用之前。
+     * ⚠️ 若未登记（或登记后建立失败），GPUPixel 会退回「私有 context」的原有行为，
+     *    功能不受影响，只是没有零拷贝收益。
+     *
+     * @return 是否捕获成功
+     */
+    public static boolean captureSharedEglContext() {
+        return nativeCaptureSharedEglContext();
+    }
+
+    /** 是否已登记共享 context（诊断用） */
+    public static boolean hasSharedEglContext() {
+        return nativeHasSharedEglContext();
+    }
+
     // JNI Native methods
     private static native void nativeYUV420ToRGBA(ByteBuffer yBuffer, ByteBuffer uBuffer,
             ByteBuffer vBuffer, int width, int height, int yRowStride, int uRowStride,
@@ -260,4 +286,8 @@ public class GPUPixel {
             byte[] rgbaOut, int outWidth, int outHeight, int rotationDegrees);
 
     private static native void nativeSetResourcePath(String path);
+
+    private static native boolean nativeCaptureSharedEglContext();
+
+    private static native boolean nativeHasSharedEglContext();
 }
